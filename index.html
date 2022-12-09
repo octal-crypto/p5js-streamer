@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <title>p5js Streamer</title>
+        <style>
+            html,button{
+                font-family: monospace;
+                background-color: black;
+                color: white;
+                text-align: center;
+                font-size: 15px;
+            }
+            button {
+                cursor: pointer;
+                border-color: white;
+                border-width: 1px;
+                border-radius: 3px
+            }
+            #status {
+                height: 10px;
+                width: 10px;
+                background-color: red;
+                border-radius: 50%;
+                display: inline-block;
+            }
+            a { text-decoration: none; color: white; }
+            a:hover { text-decoration: underline; }
+            #github { position:absolute; top:5px; right:5px; }
+            #status.ok { background-color: lime }
+            #pause, #resume, #stop, #fullscreen { display:none; }
+        </style>
+    </head>
+    <body>
+        <a id="github" href="https://github.com/octal-crypto/p5js-streamer">GitHub</a>
+        <div id="header">
+            <h2>p5js Streamer</h2>
+            <button id="snowcrash">Random SnowCrash</button>
+            <button id="axon">Random Axon</button>
+            <br><br>
+        </div>
+        <canvas id="canvas"></canvas>
+        <div id="footer">
+            <br>
+            <button id="pause">Pause</button>
+            <button id="resume">Resume</button>
+            <button id="stop">Stop</button>
+            <button id="fullscreen">Fullscreen</button>
+            <br><br>
+            <span>FPS:</span><span id="fps">..</span>
+            <span>&nbsp;Received:</span><span id="received">0</span>
+            <span>&nbsp;Buffered:</span><span id="buffered">0</span>
+            <span>&nbsp;Connection:</span><span id="status"></span>
+        </div>
+        <script>
+            // FIFO queue implemented with a linked list.
+            // Note: A circular buffer array is another possible implementation.
+            //       It's not used here because occasional resizes are required
+            //       when the length is not capped. But it's worth benchmarking.
+            class Node {constructor(data) {this.data=data; this.next=null}}
+            class Queue {
+                constructor() {this.head=null; this.tail=null; this.size=0}
+                enqueue(item) {
+                    const node = new Node(item);
+                    this.size++ == 0 ? this.head=node : this.tail.next=node;
+                    this.tail = node;
+                }
+                dequeue() {
+                    if (this.size == 0) throw "Queue is empty";
+                    const data = this.head.data;
+                    this.head = this.head.next;
+                    this.size--;
+                    return data;
+                }
+            }
+
+            // Utility for measuring frames per second
+            class Fps {
+                constructor() {this.totalFrames=0; this.reset()}
+                reset() {this.start=performance.now(); this.frames=0}
+                rate() {return 1000*this.frames/(performance.now()-this.start)}
+                elapsed() {return performance.now()-this.start}
+                increment() {this.frames++; this.totalFrames++}
+            }
+
+            const buffer = new Queue(); // A buffer of frames to be rendered
+            const fps = new Fps();
+            const header = document.getElementById("header");
+            const footer = document.getElementById("footer");
+            const snowcrash = document.getElementById("snowcrash");
+            const axon = document.getElementById("axon");
+            const pause = document.getElementById("pause");
+            const resume = document.getElementById("resume");
+            const stopBtn = document.getElementById("stop");
+            const fullscreen = document.getElementById("fullscreen");
+            const fpsSpan = document.getElementById("fps");
+            const buffered = document.getElementById("buffered");
+            const received = document.getElementById("received");
+            const status = document.getElementById("status");
+            const canvas = document.getElementById("canvas");
+            const canvasCtx = canvas.getContext("2d");
+
+            // Tell the server to start rendering
+            function start(input) {
+                ws.send(JSON.stringify({start:input}));
+                fps.reset();
+
+                // Write the input to the URL query string
+                const query = Object.entries(input).reduce((p,c) => p+(p?"&":"?")+c[0]+"="+c[1],"");
+                history.replaceState(null, null, location.pathname + query);
+
+                stopBtn.style.display = pause.style.display = fullscreen.style.display = "inline-block";
+                resume.style.display = "none";
+            }
+
+            // Re-renders the canvas with the next frame
+            function render() {
+                if (buffer.size == 0) return;
+                const frame = buffer.dequeue();
+
+                // Support resizing the canvas during rendering
+                if (frame.width != canvas.width || frame.height != canvas.height) {
+                    canvas.width = frame.width;
+                    canvas.height = frame.height;
+                }
+
+                canvasCtx.putImageData(frame, 0, 0);
+                fps.increment();
+                received.textContent = fps.totalFrames;
+                buffered.textContent = buffer.size;
+
+                // Keep rendering while frames are buffered
+                if (buffer.size > 0) requestAnimationFrame(render);
+            }
+
+            // Parses the URL query string
+            function parseQuery() {
+                const query = {};
+                if (window.location.search) {
+                    const search = decodeURIComponent(window.location.search.slice(1));
+                    for (let param of search.split("&")) {
+                        param = param.split("=");
+                        query[param[0]] = param[1];
+                    }
+                }
+                return query;
+            }
+            let input = parseQuery();
+
+            // Open a websocket connection to the server
+            const ws = new WebSocket(`wss://ws.octal.art`);
+            ws.binaryType = "arraybuffer";
+            ws.onerror = e => console.error(e);
+            ws.onclose = () => status.className = ""; // TODO: Consider re-opening the connection
+            ws.onopen = () => {
+                status.className = "ok";
+                input.art ? start(input) : snowcrash.click();
+
+                // Send mouse + keyboard events to the server
+                canvas.addEventListener("click", e => ws.send(JSON.stringify({mouseClicked:true})));
+                window.addEventListener("keydown", e => ws.send(JSON.stringify({keyPressed: {keyCode:e.keyCode}})));
+            }
+
+            // When a new frame is received
+            ws.onmessage = function(event) {
+
+                // First 4 bytes are width and height, remaining are RGBA pixels
+                const [width, height] = new Uint16Array(event.data, 0, 2);
+                buffer.enqueue(new ImageData(new Uint8ClampedArray(event.data, 4), width, height));
+                if (buffer.size == 1) requestAnimationFrame(render);
+
+                // Occasionally update the server with our desired FPS.
+                // Slower if we're buffering frames, and faster if our buffer is empty.
+                if (fps.elapsed() > 5000) {
+                    // Note: A more sophisticated PID controller technique could tune the
+                    //       FPS quicker and smoother, but we'll just make small adjustments.
+                    const rate = fps.rate();
+                    ws.send(JSON.stringify({fps: rate * (buffer.size < 2 ? 1.1 : 0.9)}));
+                    fpsSpan.textContent = Math.round(rate);
+                    fps.reset();
+                }
+            }
+
+            // Generate random inputs for art
+            axon.onclick = () => start({art:"axons", number:Math.floor(Math.random()*1e15)});
+            snowcrash.onclick = () => {
+                const r = n => Math.floor(Math.random()*n);
+                let hash = ""+r(10)+r(4)+r(4)+r(4)+r(4)+r(2)+r(6)+r(2);
+                start({art:"snowcrash", hash:hash, id:r(1000)});
+            }
+
+            pause.onclick = () => {
+                pause.style.display = "none";
+                resume.style.display = "inline-block";
+                ws.send(JSON.stringify({pause:true}));
+            }
+            resume.onclick = () => {
+                pause.style.display = "inline-block";
+                resume.style.display = "none";
+                fps.reset();
+                ws.send(JSON.stringify({resume:true}));
+            }
+            stopBtn.onclick = () => {
+                stopBtn.style.display = pause.style.display = resume.style.display = fullscreen.style.display = "none";
+                ws.send(JSON.stringify({stop:true}));
+            }
+
+            // Evaluate full screen initially, on browser back/forwards, and when button is clicked
+            function setFullscreen(on) { header.style.display = footer.style.display = on ? "none" : "block" }
+            setFullscreen(input.fs);
+            window.addEventListener("popstate", () => {input=parseQuery(); setFullscreen(input.fs)});
+            fullscreen.onclick = () => {
+                setFullscreen(true);
+                history.pushState(null, null, location.pathname + location.search+"&fs=1");
+            }
+        </script>
+    </body>
+</html>
