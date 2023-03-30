@@ -1,7 +1,5 @@
 # p5js-streamer
 
-## https://octal.art/p5js-streamer
-
 This project renders animated p5.js art on a server, and streams pixels to clients.
 
 A display may not have sufficient CPU to render at the desired resolution or FPS, but it can do so by offloading the `draw()` calculations to a more powerful server.
